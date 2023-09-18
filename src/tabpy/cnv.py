@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError, InitVar, dataclass, field, replace
 from functools import reduce
 from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 def try_str2int(val: str) -> str|int:
     try:
@@ -58,25 +58,25 @@ CodeRange = IntRange|StrRange
 class CategorySet:
     code_length: int
     letter_codes: bool
-    categories: Set[int, Category]
+    categories: FrozenSet[Category]
 
     def __len__(self):
         return len(self.categories)
 
     def get_root(self, item: Code) -> Optional[Category]:
-        for cat in self.categories.values():
-            if ans := cat.get_root(item):
-                return ans
+        for cat in self.categories:
+            if item in cat:
+                return cat
         return None
 
     def get_leaf(self, item: Code) -> Optional[Category]:
-        for cat in self.categories.values():
+        for cat in self.categories:
             if ans := cat.get_leaf(item):
                 return ans
         return None
 
     def get_path(self, item: Code) -> Optional[List[Category]]:
-        for cat in self.categories.values():
+        for cat in self.categories:
             if ans := cat.get_path(item):
                 return ans
         return None
@@ -87,6 +87,22 @@ class CategorySet:
             return ans
         else:
             raise KeyError(item)
+
+    @property
+    def flat_categories(self) -> Dict[int, Category]:
+        def flatten(cat: Category):
+            yield cat
+            for child in cat.children:
+                flatten(child)
+
+        ans: Dict[int, Category] = {}
+        for cat in self.categories:
+            for item in flatten(cat):
+                ans[item.idx] = item
+        ans: List[Category] = list(ans.values())
+        ans.sort(key=lambda x: x.idx)
+        ans = { item.idx: item for item in ans }
+        return ans
 
     @staticmethod
     def from_cnv_file(contents: str) -> CategorySet:
@@ -107,52 +123,95 @@ class CategorySet:
 
 
         # Parse each line
-        raw_categories: Dict[int, List[RawCategoryLine]] = defaultdict(list)
+        raw_category_lines: Dict[int, List[RawCategoryLine]] = defaultdict(list)
         for line in lines[1:]:
-            # skip comments
-            if line.lstrip().startswith(";"):
-                continue
+            if parsed_line := RawCategoryLine.from_cnv_line(line, letter_codes):
+                raw_category_lines[parsed_line.idx].append(parsed_line)
 
-            parsed_line = RawCategoryLine.from_cnv_line(line, letter_codes)
-            raw_categories[parsed_line.idx].append(parsed_line)
-
-        # Actually create the categories
-        categories: Dict[int, Category] = {}
-        parents: Dict[int, int] = {}
-        children = defaultdict(list)
-        for cat_raw_lines in raw_categories.values():
-            cat_raw = cat_raw_lines[0]
-
-            # Join the multiple lines of the category
-            if len(cat_raw_lines) == 1:
-                codes = cat_raw_lines[0].codes
-                code_ranges = cat_raw_lines[0].code_ranges
+        # Join lines
+        raw_categories: Dict[int, RawCategoryLine] = {}
+        for raw_cat_lines in raw_category_lines.values():
+            # Join the multiple lines of the category if needed
+            if len(raw_cat_lines) == 1:
+                cat_raw = raw_cat_lines[0]
+                raw_categories[cat_raw.idx] = cat_raw
             else:
-                codes = reduce(lambda a, b: a.codes + b.codes, cat_raw_lines)
-                code_ranges = reduce(lambda a, b: a.code_ranges + b.code_ranges, cat_raw_lines)
+                cat_raw = raw_cat_lines[0]
+                codes = reduce(lambda a, b: a.codes + b.codes, raw_cat_lines)
+                code_ranges = reduce(lambda a, b: a.code_ranges + b.code_ranges, raw_cat_lines)
+                raw_categories[cat_raw.idx] = replace(cat_raw, codes=codes, code_ranges=code_ranges)
 
-            # Create the object and save relations for latter
-            categories[cat_raw.idx] = Category(cat_raw.idx, cat_raw.name, codes, code_ranges)
-            if parent_idx := cat_raw.parent_idx is not None:
-                parents[cat_raw.idx] = parent_idx
-                children[parent_idx].append(cat_raw.idx)
+        # Compute children
+        direct_children: Dict[int, List[int]] = defaultdict(list)
+        roots: Set[int] = set()
+        for raw_cat in raw_categories.values():
+            if raw_cat.parent_idx is None:
+                roots.add(raw_cat.idx)
+            else:
+                direct_children[raw_cat.parent_idx].append(raw_cat.idx)
 
-        # Add the children and parents
-        for cat in categories.values():
-            if parent_idx := parents.get(cat.idx):
-                cat.__dict__['parent'] = categories[parent_idx]
-                categories[parent_idx].children.append(cat)
-
-        # Possible TODO: check for data validity and loops in the category tree
+        # Make categories
+        def make_category(cat_idx: int) -> Category:
+            children = []
+            for child_idx in direct_children[cat_idx]:
+                children.append(make_category(child_idx))
+            raw_cat = raw_categories[cat_idx]
+            return Category(raw_cat.idx, raw_cat.name, raw_cat.codes, raw_cat.code_ranges, raw_cat.parent_idx, frozenset(children))
+        categories: List[Category] = []
+        for cat_idx in roots:
+            categories.append(make_category(cat_idx))
 
         # Finish
-        return CategorySet(code_length, letter_codes, categories)
+        return CategorySet(code_length, letter_codes, frozenset(categories))
 
     @staticmethod
     def from_cnv_path(file_path: str|Path, encoding: str = 'iso-8859-1') -> CategorySet:
         """Creates a new CategorySet from a path to a CNV file. By default, the file will be read with the ISO-8859-1 (aka Latin-1) encoding as this is what SUS uses on its FTP server."""
         with open(file_path, 'r', encoding=encoding) as f:
             return CategorySet.from_cnv_file(f.read())
+
+@dataclass(frozen=True)
+class Category:
+    idx: int
+    name: str
+    codes: FrozenSet[Code] = field(default_factory=frozenset)
+    ranges: FrozenSet[CodeRange] = field(default_factory=frozenset)
+    parent_idx: Optional[int] = None
+    children: FrozenSet[Category] = field(default_factory=frozenset)
+    _all_codes: InitVar[FrozenSet[Code]] = None
+    _all_ranges: InitVar[FrozenSet[CodeRange]] = None
+
+    @property
+    def is_leaf(self) -> bool:
+        return len(self.children) == 0
+
+    def __contains__(self, item: Code) -> bool:
+        return item in self._all_codes or any([item in x for x in self._all_ranges])
+
+    def __post_init__(self, *args):
+        self.__dict__['codes'] = frozenset(self.codes)
+        self.__dict__['ranges'] = frozenset(self.ranges)
+        self.__dict__['children'] = frozenset(self.children)
+
+        all_codes: Set[Code] = set(self.codes)
+        all_ranges: Set[CodeRange] = set(self.ranges)
+        for child in self.children:
+            all_codes = all_codes.union(child._all_codes)
+            all_ranges = all_ranges.union(child._all_ranges)
+        self.__dict__['_all_codes'] = all_codes
+        self.__dict__['_all_ranges'] = all_ranges
+
+    def get_leaf(self, item: Code) -> Optional[Category]:
+        for cat in self.children:
+            if ans := cat.get_leaf(item):
+                return ans
+        return self if item in self else None
+
+    def get_path(self, item: Code) -> Optional[List[Category]]:
+        for cat in self.children:
+            if ans := cat.get_path(item):
+                return [self]+ans
+        return [self] if item in self else None
 
 @dataclass(frozen=True)
 class RawCategoryLine:
@@ -164,8 +223,13 @@ class RawCategoryLine:
     code_ranges: List[CodeRange]
 
     @staticmethod
-    def from_cnv_line(line: str, only_strings: bool) -> RawCategoryLine:
+    def from_cnv_line(line: str, only_strings: bool) -> Optional[RawCategoryLine]:
         """Creates a new Category from a line of a CNV file."""
+        if line.strip() == "":
+            return None
+        if line.lstrip().startswith(";"):
+            return None
+
         line += " "*70 # ensure the line is long enough
         parent = int_or_none(line[0:3])
         idx = int(line[3:7])
@@ -198,53 +262,3 @@ def parse_category_codes(itens: str, only_strings: bool) -> Tuple[List[Code], Li
     codes = list(filter(lambda x: isinstance(x, Code), codes_and_ranges))
     ranges = list(filter(lambda x: isinstance(x, CodeRange), codes_and_ranges))
     return codes, ranges
-
-@dataclass(frozen=True)
-class Category:
-    idx: int
-    name: str
-    codes: Set[Code]
-    ranges: Set[CodeRange]
-    parent: Optional[Category] = None
-    children: Dict[int, Category] = field(default_factory=dict)
-
-    @property
-    def is_leaf(self) -> bool:
-        return len(self.children) == 0
-
-    def __contains__(self, item: Code) -> bool:
-        return item in self.codes or any([item in x for x in self.ranges])
-
-    def get_root(self, item: Code) -> Optional[Category]:
-        """Returns the root category associated with the requested code."""
-        if self.parent is None:
-            return self if item in self else None
-        else:
-            return self.parent.get_root(item)
-
-    def get_leaf(self, item: Code) -> Optional[Category]:
-        """Returns the leaf category associated with the requested code."""
-        if self.is_leaf:
-            return self if item in self else None
-        else:
-            for child in self.children:
-                if ans := child.get(item):
-                    return ans
-        return None
-
-    def get_path(self, item: Code) -> Optional[List[Category]]:
-        if self.is_leaf:
-            return [self] if item in self else None
-
-        if item in self:
-            for child in self.children.values():
-                if ans := child.get_path(item):
-                    return [self]+ans
-        return None
-
-    def __getitem__(self, item: Code) -> Category:
-        ans = self.get_leaf(item)
-        if ans is not None:
-            return ans
-        else:
-            raise KeyError(item)

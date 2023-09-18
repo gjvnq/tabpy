@@ -12,7 +12,7 @@ regions_cnv = """
       3  Centro-Oeste                                       GO,MT,MS,DF
       4  Sudeste                                            MG,SP,RJ,ES
       5  Sul                                                RS,PR,SC
-""".strip()
+"""[1:]
 
 uf_cnv = """
      28  2
@@ -44,14 +44,52 @@ uf_cnv = """
      25  51 Mato Grosso                                     51
      26  52 Goiás                                           52
      27  53 Distrito Federal                                53
-""".strip()
+"""[1:]
+
+uf_region_cnv = """
+     33  2
+      1  Região Norte                                       XX
+001   2  .. Rondônia                                        11
+001   3  .. Acre                                            12
+001   4  .. Amazonas                                        13
+001   5  .. Roraima                                         14
+001   6  .. Pará                                            15
+001   7  .. Amapá                                           16
+001   8  .. Tocantins                                       17
+      9  Região Nordeste                                    XX
+009  10  .. Maranhão                                        21
+009  11  .. Piauí                                           22
+009  12  .. Ceará                                           23
+009  13  .. Rio Grande do Norte                             24
+009  14  .. Paraíba                                         25
+009  15  .. Pernambuco                                      26,20
+009  16  .. Alagoas                                         27
+009  17  .. Sergipe                                         28
+009  18  .. Bahia                                           29
+     19  Região Sudeste                                     XX
+019  20  .. Minas Gerais                                    31
+019  21  .. Espírito Santo                                  32
+019  22  .. Rio de Janeiro                                  33
+019  23  .. São Paulo                                       35
+     24  Região Sul                                         XX
+024  25  .. Paraná                                          41
+024  26  .. Santa Catarina                                  42
+024  27  .. Rio Grande do Sul                               43
+     28  Região Centro-Oeste                                XX
+028  29  .. Mato Grosso do Sul                              50
+028  30  .. Mato Grosso                                     51
+028  31  .. Goiás                                           52
+028  32  .. Distrito Federal                                53
+     33  Ignorado/Exterior                                  XX
+     33  Ignorado/Exterior                                  00
+"""[1:]
 
 sex_cnv = """
 3 1
       1  Masculino                                          1
       2  Feminino                                           2
       3  Ignorado                                           0,3-9
-""".strip()
+"""[1:]
 
 def test_IntRange_in():
     r = IntRange(1, 7)
@@ -112,23 +150,30 @@ def test_RawCategoryLine_from_cnv_line_3():
 def test_CategorySet_from_cnv_file_1():
     cats = CategorySet.from_cnv_file(sex_cnv)
     assert(len(cats) == 3)
-    assert(cats[0] == Category(3, 'Ignorado', [0], [IntRange(3, 9)], None, {}))
-    assert(cats[1] == Category(1, 'Masculino', [1], [], None, {}))
-    assert(cats[2] == Category(2, 'Feminino', [2], [], None, {}))
-    assert(cats[9] == Category(3, 'Ignorado', [0], [IntRange(3, 9)], None, {}))
+    assert(cats[0] == Category(3, 'Ignorado', {0}, {IntRange(3, 9)}))
+    assert(cats[1] == Category(1, 'Masculino', {1}))
+    assert(cats[2] == Category(2, 'Feminino', {2}))
+    assert(cats[9] == Category(3, 'Ignorado', {0}, {IntRange(3, 9)}))
     assert(cats[9] == cats[0])
     assert(cats[0] == cats.get_leaf(0))
     assert(cats[4] == cats.get_leaf(4))
-    assert(cats.get_path(1) == [Category(1, 'Masculino', [1], [], None, {})])
+    assert(cats.get_path(1) == [Category(1, 'Masculino', {1})])
 
 def test_CategorySet_from_cnv_file_2():
     cats = CategorySet.from_cnv_file(regions_cnv)
     assert(len(cats) == 5)
-    assert(cats["SP"] == Category(4, 'Sudeste', ['MG', 'SP', 'RJ', 'ES'], [], None, {}))
-    print(cats)
+    assert(cats["SP"] == Category(4, 'Sudeste', {'MG', 'SP', 'RJ', 'ES'}))
     with pytest.raises(KeyError):
         cats["UF"]
     with pytest.raises(KeyError):
         cats["sp"]
 
-# TODO: hierarchal examples
+def test_CategorySet_from_cnv_file_3():
+    cats = CategorySet.from_cnv_file(uf_region_cnv)
+    assert(cats['XX'].name.startswith('Região '))
+    assert(len(cats['XX'].children) > 0)
+    assert(cats[12].name == '.. Acre')
+    assert(len(cats[12].children) == 0)
+    assert(cats[0].name == 'Ignorado/Exterior')
+    assert(list(map(lambda x: x.name, cats.get_path(12))) == ['Região Norte', '.. Acre'])
+    assert(cats.get_root(12).name == 'Região Norte')
